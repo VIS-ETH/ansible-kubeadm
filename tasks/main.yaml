@@ -63,3 +63,56 @@
     dest: /etc/containerd/config.toml
     mode: "0644"
   notify: Restart containerd
+
+- name: Copy audit policy
+  become: true
+  ansible.builtin.copy:
+    src: audit-policy.yaml
+    dest: /etc/kubernetes/audit-policy.yaml
+    owner: root
+    group: root
+    mode: "0600"
+  when: kubeadm_enable_audit
+
+- name: Add audit arguments
+  become: true
+  ansible.builtin.blockinfile:
+    path: /etc/kubernetes/manifests/kube-apiserver.yaml
+    block: "{{ item.block | indent(width=item.indent, first=True) }}"
+    marker: "{{ ('# {mark} Ansible managed Kubeadm configuration (' + item.desc + ')') | indent(item.indent, first=True) }}"
+    insertafter: "{{ item.insertafter }}"
+    state: "{{ 'present' if kubeadm_enable_audit else 'absent' }}"
+  loop:
+    - block: |
+          - mountPath: /etc/kubernetes/audit-policy.yaml
+            name: audit
+            readOnly: true
+          - mountPath: /var/log/kubernetes/audit/
+            name: audit-log
+            readOnly: false
+      insertafter: "    volumeMounts:"
+      desc: "VolumeMounts"
+      indent: 4
+    - block: |
+        - name: audit
+          hostPath:
+            path: /etc/kubernetes/audit-policy.yaml
+            type: File
+
+        - name: audit-log
+          hostPath:
+            path: /var/log/kubernetes/audit/
+            type: DirectoryOrCreate
+      insertafter: "  volumes:"
+      indent: 2
+      desc: "Volumes"
+    - insertafter: >-
+        (?m)spec:\n  containers:\n  - command:\n    - kube-apiserver
+      block: |
+        - --audit-policy-file=/etc/kubernetes/audit-policy.yaml
+        - --audit-log-path=/var/log/kubernetes/audit/audit.log
+        - --audit-log-maxsize=50   # Logfiles rotated when 50MB
+        - --audit-log-maxbackup=5  # Write at most 5 files
+        - --audit-log-maxage=10    # Keep at most 10 days
+      indent: 4
+      desc: "Arguments"

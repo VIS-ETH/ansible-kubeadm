@@ -1,0 +1,33 @@
+apiVersion: audit.k8s.io/v1
+kind: Policy
+rules:
+  # Any essential stuff / service account ignored... Realistically can only care about users here
+  - level: None
+    userGroups:
+      - "system:serviceaccounts"
+      - "system:masters"
+      - "system:monitoring"
+  - level: None
+    users:
+      - "system:kube-scheduler"
+      - "system:kube-proxy"
+      - "system:kube-controller-manager"
+
+  # Log configmap and secret changes in all namespaces at the Metadata level.
+  - level: Metadata
+    resources:
+      - group: "" # core API group
+        resources: ["secrets"]
+
+  # Log all other resources in core and extensions at the Request level.
+  - level: Request
+    resources:
+      - group: "" # core API group
+      - group: "extensions" # Version of group should NOT be included.
+
+  # A catch-all rule to log all other requests at the Metadata level.
+  - level: Metadata
+    # Long-running requests like watches that fall under this rule will not
+    # generate an audit event in RequestReceived.
+    omitStages:
+      - "RequestReceived"
