@@ -56,6 +56,26 @@
     - net.bridge.bridge-nf-call-ip6tables
     - net.ipv4.ip_forward
 
+# Alloy likes watching files
+- name: Set sysctl limits for Alloy (Monitoring)
+  become: true
+  ansible.posix.sysctl:
+    name: "{{ item.name }}"
+    value: "{{ item.value }}"
+    reload: true
+    sysctl_file: /etc/sysctl.d/50-ansible-alloy.conf
+  with_items:
+    - name: fs.inotify.max_user_watches
+      value: 10485760 # default: 328588
+    - name: fs.inotify.max_user_instances
+      value: 32768 # default 128
+    # - name: fs.inotify.max_queued_events
+    #   value: 8192 # default 16384
+    - name: vm.max_map_count
+      value: 262144 # default 65530
+  when: inventory_hostname in groups["kube_worker"]
+
+
 - name: Copy containerd configuration
   become: true
   ansible.builtin.copy:
