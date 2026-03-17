@@ -1,29 +1,31 @@
 - name: Add K8s GPG key
-  become: True
-  apt_key:
-    url: "https://pkgs.k8s.io/core:/stable:/v1.29/deb/Release.key"
-    state: present
+  become: true
+  ansible.builtin.get_url:
+    url: "https://pkgs.k8s.io/core:/stable:/v1.32/deb/Release.key"
+    dest: /etc/apt/keyrings/kubernetes-apt-keyring.asc
+    checksum: "sha256: 7627818cf7bae52f9008c93e8b1f961f53dea11d40891778de216fb1b43be54d"
+    mode: "0644"
 
 - name: Add APT repository
-  become: True
-  apt_repository:
-    repo: "deb https://pkgs.k8s.io/core:/stable:/v1.29/deb/ /"
+  become: true
+  ansible.builtin.apt_repository:
+    repo: "deb [signed-by=/etc/apt/keyrings/kubernetes-apt-keyring.asc] https://pkgs.k8s.io/core:/stable:/v1.32/deb/ /"
     state: present
 
 - name: Install packages
-  become: True
-  apt:
+  become: true
+  ansible.builtin.apt:
     name:
       - kubelet
       - kubeadm
       - kubectl
       - containerd
     state: present
-    update_cache: True
+    update_cache: true
 
 - name: Hold packages
-  become: True
-  dpkg_selections:
+  become: true
+  ansible.builtin.dpkg_selections:
     name: "{{ item }}"
     selection: hold
   with_items:
@@ -32,41 +34,105 @@
     - kubectl
 
 - name: Add required kernel modules to modules-load.d
-  become: True
-  copy:
+  become: true
+  ansible.builtin.copy:
     src: containerd.conf
     dest: "/etc/modules-load.d/containerd.conf"
-  register: module
+    mode: "0644"
+  notify: Reload modules
 
-- name: Reload modules
-  become: True
-  systemd:
-    name: systemd-modules-load.service
-    state: restarted
-    daemon_reload: True
-  when: module
+- name: Flush handlers
+  ansible.builtin.meta: flush_handlers
 
 - name: Set sysctl
-  become: True
-  sysctl:
+  become: true
+  ansible.posix.sysctl:
     name: "{{ item }}"
     value: 1
-    reload: True
+    reload: true
     sysctl_file: /etc/sysctl.d/90-ansible-kubeadm.conf
   with_items:
     - net.bridge.bridge-nf-call-iptables
     - net.bridge.bridge-nf-call-ip6tables
     - net.ipv4.ip_forward
 
+# Alloy likes watching files
+- name: Set sysctl limits for Alloy (Monitoring)
+  become: true
+  ansible.posix.sysctl:
+    name: "{{ item.name }}"
+    value: "{{ item.value }}"
+    reload: true
+    sysctl_file: /etc/sysctl.d/50-ansible-alloy.conf
+  with_items:
+    - name: fs.inotify.max_user_watches
+      value: 10485760 # default: 328588
+    - name: fs.inotify.max_user_instances
+      value: 32768 # default 128
+    # - name: fs.inotify.max_queued_events
+    #   value: 8192 # default 16384
+    - name: vm.max_map_count
+      value: 262144 # default 65530
+  when: inventory_hostname in groups["kube_worker"]
+
+
 - name: Copy containerd configuration
-  become: True
-  copy:
+  become: true
+  ansible.builtin.copy:
     src: config.toml
     dest: /etc/containerd/config.toml
-  notify: restart containerd
+    mode: "0644"
+  notify: Restart containerd
 
-# - name: Add resolv.conf in /etc/kubernetes
-#   become: True
-#   template:
-#     src: resolv.conf.j2
-#     dest: /etc/kubernetes/resolv.conf
+- name: Copy audit policy
+  become: true
+  ansible.builtin.copy:
+    src: audit-policy.yaml
+    dest: /etc/kubernetes/audit-policy.yaml
+    owner: root
+    group: root
+    mode: "0600"
+  when: kubeadm_enable_audit
+
+- name: Add audit arguments
+  become: true
+  ansible.builtin.blockinfile:
+    path: /etc/kubernetes/manifests/kube-apiserver.yaml
+    block: "{{ item.block | indent(width=item.indent, first=True) }}"
+    marker: "{{ ('# {mark} Ansible managed Kubeadm configuration (' + item.desc + ')') | indent(item.indent, first=True) }}"
+    insertafter: "{{ item.insertafter }}"
+    state: "{{ 'present' if kubeadm_enable_audit else 'absent' }}"
+  loop:
+    - block: |
+          - mountPath: /etc/kubernetes/audit-policy.yaml
+            name: audit
+            readOnly: true
+          - mountPath: /var/log/kubernetes/audit/
+            name: audit-log
+            readOnly: false
+      insertafter: "    volumeMounts:"
+      desc: "VolumeMounts"
+      indent: 4
+    - block: |
+        - name: audit
+          hostPath:
+            path: /etc/kubernetes/audit-policy.yaml
+            type: File
+
+        - name: audit-log
+          hostPath:
+            path: /var/log/kubernetes/audit/
+            type: DirectoryOrCreate
+      insertafter: "  volumes:"
+      indent: 2
+      desc: "Volumes"
+    - insertafter: >-
+        (?m)spec:\n  containers:\n  - command:\n    - kube-apiserver
+      block: |
+        - --audit-policy-file=/etc/kubernetes/audit-policy.yaml
+        - --audit-log-path=/var/log/kubernetes/audit/audit.log
+        - --audit-log-maxsize=50   # Logfiles rotated when 50MB
+        - --audit-log-maxbackup=5  # Write at most 5 files
+        - --audit-log-maxage=10    # Keep at most 10 days
+      indent: 4
+      desc: "Arguments"
